@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import bcrypt from "bcryptjs";
 import Database from "better-sqlite3";
 
-const configuredPath = process.env.DATABASE_PATH || "./data/peblo-notes.db";
+const configuredPath =
+  process.env.DATABASE_PATH || (process.env.VERCEL ? "/tmp/peblo-notes.db" : "./data/peblo-notes.db");
 const resolvedPath = path.isAbsolute(configuredPath)
   ? configuredPath
   : path.join(process.cwd(), configuredPath);
@@ -13,6 +15,8 @@ const globalForDb = globalThis as unknown as {
   pebloDb?: Database.Database;
   pebloDbSchemaReady?: boolean;
 };
+
+const DEMO_USER_ID = "demo-peblo-user";
 
 export const db =
   globalForDb.pebloDb ??
@@ -84,5 +88,85 @@ export function ensureSchema() {
     );
   `);
 
+  ensureDemoWorkspace();
   globalForDb.pebloDbSchemaReady = true;
+}
+
+function ensureDemoWorkspace() {
+  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get("demo@peblo.app");
+
+  if (existing) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+
+  db.prepare("INSERT INTO users (id, name, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
+    DEMO_USER_ID,
+    "Peblo Demo",
+    "demo@peblo.app",
+    bcrypt.hashSync("Demo@12345", 10),
+    now
+  );
+
+  const notes = [
+    {
+      title: "Sprint Planning Notes",
+      category: "Work",
+      content:
+        "Discussed workspace onboarding, AI summary flow, and public sharing. Action: prepare final UI polish. Action: validate metrics cards before shipping.",
+      tags: ["planning", "ai", "delivery"]
+    },
+    {
+      title: "Founder Research",
+      category: "Ideas",
+      content:
+        "Peblo should feel playful but trustworthy. Capture parent-safe design cues, fast note capture, and strong teacher collaboration use cases.",
+      tags: ["research", "product"]
+    },
+    {
+      title: "Weekly Review",
+      category: "Personal",
+      content:
+        "Wins: shipped auth and auto-save. Blockers: edge cases around empty titles. Next step: clean dashboard copy and record demo video.",
+      tags: ["review", "weekly", "shipping"]
+    }
+  ];
+
+  for (const note of notes) {
+    const noteId = crypto.randomUUID();
+
+    db.prepare(
+      `INSERT INTO notes (id, user_id, title, content, category, ai_summary, ai_suggested_title, ai_action_items, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      noteId,
+      DEMO_USER_ID,
+      note.title,
+      note.content,
+      note.category,
+      note.content.slice(0, 120),
+      note.title,
+      JSON.stringify(
+        note.content
+          .split(".")
+          .map((part) => part.trim())
+          .filter((part) => part.toLowerCase().startsWith("action:"))
+          .map((part) => part.replace(/^action:\s*/i, ""))
+      ),
+      now,
+      now
+    );
+
+    for (const tagName of note.tags) {
+      let tag = db.prepare("SELECT id FROM tags WHERE name = ?").get(tagName) as { id: string } | undefined;
+
+      if (!tag) {
+        tag = { id: crypto.randomUUID() };
+        db.prepare("INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)").run(tag.id, tagName, now);
+      }
+
+      db.prepare("INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)").run(noteId, tag.id);
+    }
+  }
 }
